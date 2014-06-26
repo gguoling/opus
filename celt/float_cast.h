@@ -97,7 +97,7 @@
         {
                 return _mm_cvtss_si32(_mm_load_ss(&value));
         }
-#elif (defined(_MSC_VER) && _MSC_VER >= 1400) && (defined (WIN32) || defined (_WIN32))
+#elif (defined(_MSC_VER) && _MSC_VER >= 1400) && (defined (WIN32) || defined (_WIN32)) && !defined(NO_INLINE_ASM)
         #include <math.h>
 
         /*      Win32 doesn't seem to have these functions.
