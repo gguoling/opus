@@ -44,6 +44,10 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)$(Platform)\$(Configuration)\$(TargetName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup>
     <GenerateManifest>false</GenerateManifest>
   </PropertyGroup>
   <ItemDefinitionGroup>
