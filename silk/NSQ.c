@@ -8,7 +8,7 @@ this list of conditions and the following disclaimer.
 - Redistributions in binary form must reproduce the above copyright
 notice, this list of conditions and the following disclaimer in the
 documentation and/or other materials provided with the distribution.
-- Neither the name of Internet Society, IETF or IETF Trust, nor the 
+- Neither the name of Internet Society, IETF or IETF Trust, nor the
 names of specific contributors, may be used to endorse or promote
 products derived from this software without specific prior written
 permission.
@@ -32,7 +32,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "main.h"
 #include "stack_alloc.h"
 
-static inline void silk_nsq_scale_states(
+static OPUS_INLINE void silk_nsq_scale_states(
     const silk_encoder_state *psEncC,           /* I    Encoder State                   */
     silk_nsq_state      *NSQ,                   /* I/O  NSQ state                       */
     const opus_int32    x_Q3[],                 /* I    input in Q3                     */
@@ -46,7 +46,8 @@ static inline void silk_nsq_scale_states(
     const opus_int      signal_type             /* I    Signal type                     */
 );
 
-static inline void silk_noise_shape_quantizer(
+#if !defined(OPUS_X86_MAY_HAVE_SSE4_1)
+static OPUS_INLINE void silk_noise_shape_quantizer(
     silk_nsq_state      *NSQ,                   /* I/O  NSQ state                       */
     opus_int            signalType,             /* I    Signal type                     */
     const opus_int32    x_sc_Q10[],             /* I                                    */
@@ -67,8 +68,10 @@ static inline void silk_noise_shape_quantizer(
     opus_int            shapingLPCOrder,        /* I    Noise shaping AR filter order   */
     opus_int            predictLPCOrder         /* I    Prediction filter order         */
 );
+#endif
 
-void silk_NSQ(
+void silk_NSQ_c
+(
     const silk_encoder_state    *psEncC,                                    /* I/O  Encoder State                   */
     silk_nsq_state              *NSQ,                                       /* I/O  NSQ state                       */
     SideInfoIndices             *psIndices,                                 /* I/O  Quantization Indices            */
@@ -141,7 +144,7 @@ void silk_NSQ(
                 silk_assert( start_idx > 0 );
 
                 silk_LPC_analysis_filter( &sLTP[ start_idx ], &NSQ->xq[ start_idx + k * psEncC->subfr_length ],
-                    A_Q12, psEncC->ltp_mem_length - start_idx, psEncC->predictLPCOrder );
+                    A_Q12, psEncC->ltp_mem_length - start_idx, psEncC->predictLPCOrder, psEncC->arch );
 
                 NSQ->rewhite_flag = 1;
                 NSQ->sLTP_buf_idx = psEncC->ltp_mem_length;
@@ -172,7 +175,11 @@ void silk_NSQ(
 /***********************************/
 /* silk_noise_shape_quantizer  */
 /***********************************/
-static inline void silk_noise_shape_quantizer(
+
+#if !defined(OPUS_X86_MAY_HAVE_SSE4_1)
+static OPUS_INLINE
+#endif
+void silk_noise_shape_quantizer(
     silk_nsq_state      *NSQ,                   /* I/O  NSQ state                       */
     opus_int            signalType,             /* I    Signal type                     */
     const opus_int32    x_sc_Q10[],             /* I                                    */
@@ -370,7 +377,7 @@ static inline void silk_noise_shape_quantizer(
     silk_memcpy( NSQ->sLPC_Q14, &NSQ->sLPC_Q14[ length ], NSQ_LPC_BUF_LENGTH * sizeof( opus_int32 ) );
 }
 
-static inline void silk_nsq_scale_states(
+static OPUS_INLINE void silk_nsq_scale_states(
     const silk_encoder_state *psEncC,           /* I    Encoder State                   */
     silk_nsq_state      *NSQ,                   /* I/O  NSQ state                       */
     const opus_int32    x_Q3[],                 /* I    input in Q3                     */
