@@ -82,6 +82,7 @@ struct OpusCustomDecoder {
    int error;
    int last_pitch_index;
    int loss_count;
+   int skip_plc;
    int postfilter_period;
    int postfilter_period_old;
    opus_val16 postfilter_gain;
@@ -163,8 +164,6 @@ OPUS_CUSTOM_NOSTATIC int opus_custom_decoder_init(CELTDecoder *st, const CELTMod
    st->end = st->mode->effEBands;
    st->signalling = 1;
    st->arch = opus_select_arch();
-
-   st->loss_count = 0;
 
    opus_custom_decoder_ctl(st, OPUS_RESET_STATE);
 
@@ -447,7 +446,7 @@ static void celt_decode_lost(CELTDecoder * OPUS_RESTRICT st, int N, int LM)
 
    loss_count = st->loss_count;
    start = st->start;
-   noise_based = loss_count >= 5 || start != 0;
+   noise_based = loss_count >= 5 || start != 0 || st->skip_plc;
    if (noise_based)
    {
       /* Noise-based PLC/CNG */
@@ -457,10 +456,9 @@ static void celt_decode_lost(CELTDecoder * OPUS_RESTRICT st, int N, int LM)
       VARDECL(celt_norm, X);
 #endif
       opus_uint32 seed;
-      opus_val16 *plcLogE;
       int end;
       int effEnd;
-
+      opus_val16 decay;
       end = st->end;
       effEnd = IMAX(start, IMIN(end, mode->effEBands));
 
@@ -472,19 +470,13 @@ static void celt_decode_lost(CELTDecoder * OPUS_RESTRICT st, int N, int LM)
       ALLOC(X, C*N, celt_norm);   /**< Interleaved normalised MDCTs */
 #endif
 
-      if (loss_count >= 5)
-         plcLogE = backgroundLogE;
-      else {
-         /* Energy decay */
-         opus_val16 decay = loss_count==0 ?
-               QCONST16(1.5f, DB_SHIFT) : QCONST16(.5f, DB_SHIFT);
-         c=0; do
-         {
-            for (i=start;i<end;i++)
-               oldBandE[c*nbEBands+i] -= decay;
-         } while (++c<C);
-         plcLogE = oldBandE;
-      }
+      /* Energy decay */
+      decay = loss_count==0 ? QCONST16(1.5f, DB_SHIFT) : QCONST16(.5f, DB_SHIFT);
+      c=0; do
+      {
+         for (i=start;i<end;i++)
+            oldBandE[c*nbEBands+i] = MAX16(backgroundLogE[c*nbEBands+i], oldBandE[c*nbEBands+i] - decay);
+      } while (++c<C);
       seed = st->rng;
       for (c=0;c<C;c++)
       {
@@ -510,7 +502,7 @@ static void celt_decode_lost(CELTDecoder * OPUS_RESTRICT st, int N, int LM)
                DECODE_BUFFER_SIZE-N+(overlap>>1));
       } while (++c<C);
 
-      celt_synthesis(mode, X, out_syn, plcLogE, start, effEnd, C, C, 0, LM, st->downsample, 0, st->arch);
+      celt_synthesis(mode, X, out_syn, oldBandE, start, effEnd, C, C, 0, LM, st->downsample, 0, st->arch);
    } else {
       /* Pitch-based PLC */
       const opus_val16 *window;
@@ -839,6 +831,10 @@ int celt_decode_with_ec(CELTDecoder * OPUS_RESTRICT st, const unsigned char *dat
       return frame_size/st->downsample;
    }
 
+   /* Check if there are at least two packets received consecutively before
+    * turning on the pitch-based PLC */
+   st->skip_plc = st->loss_count != 0;
+
    if (dec == NULL)
    {
       ec_dec_init(&_dec,(unsigned char*)data,len);
@@ -1037,10 +1033,18 @@ int celt_decode_with_ec(CELTDecoder * OPUS_RESTRICT st, const unsigned char *dat
    /* In case start or end were to change */
    if (!isTransient)
    {
+      opus_val16 max_background_increase;
       OPUS_COPY(oldLogE2, oldLogE, 2*nbEBands);
       OPUS_COPY(oldLogE, oldBandE, 2*nbEBands);
+      /* In normal circumstances, we only allow the noise floor to increase by
+         up to 2.4 dB/second, but when we're in DTX, we allow up to 6 dB
+         increase for each update.*/
+      if (st->loss_count < 10)
+         max_background_increase = M*QCONST16(0.001f,DB_SHIFT);
+      else
+         max_background_increase = QCONST16(1.f,DB_SHIFT);
       for (i=0;i<2*nbEBands;i++)
-         backgroundLogE[i] = MIN16(backgroundLogE[i] + M*QCONST16(0.001f,DB_SHIFT), oldBandE[i]);
+         backgroundLogE[i] = MIN16(backgroundLogE[i] + max_background_increase, oldBandE[i]);
    } else {
       for (i=0;i<2*nbEBands;i++)
          oldLogE[i] = MIN16(oldLogE[i], oldBandE[i]);
@@ -1197,6 +1201,7 @@ int opus_custom_decoder_ctl(CELTDecoder * OPUS_RESTRICT st, int request, ...)
                ((char*)&st->DECODER_RESET_START - (char*)st));
          for (i=0;i<2*st->mode->nbEBands;i++)
             oldLogE[i]=oldLogE2[i]=-QCONST16(28.f,DB_SHIFT);
+         st->skip_plc = 1;
       }
       break;
       case OPUS_GET_PITCH_REQUEST:

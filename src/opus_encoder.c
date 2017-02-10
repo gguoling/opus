@@ -81,6 +81,10 @@ struct OpusEncoder {
     int          lsb_depth;
     int          encoder_buffer;
     int          lfe;
+    int          arch;
+#ifndef DISABLE_FLOAT_API
+    TonalityAnalysisState analysis;
+#endif
 
 #define OPUS_ENCODER_RESET_START stream_channels
     int          stream_channels;
@@ -100,12 +104,9 @@ struct OpusEncoder {
     StereoWidthState width_mem;
     opus_val16   delay_buffer[MAX_ENCODER_BUFFER*2];
 #ifndef DISABLE_FLOAT_API
-    TonalityAnalysisState analysis;
     int          detected_bandwidth;
-    int          analysis_offset;
 #endif
     opus_uint32  rangeFinal;
-    int          arch;
 };
 
 /* Transition tables for the voice and music. First column is the
@@ -242,6 +243,10 @@ int opus_encoder_init(OpusEncoder* st, opus_int32 Fs, int channels, int applicat
     st->first = 1;
     st->mode = MODE_HYBRID;
     st->bandwidth = OPUS_BANDWIDTH_FULLBAND;
+
+#ifndef DISABLE_FLOAT_API
+    tonality_analysis_init(&st->analysis);
+#endif
 
     return OPUS_OK;
 }
@@ -855,9 +860,6 @@ opus_int32 compute_frame_size(const void *analysis_pcm, int frame_size,
 
 opus_val16 compute_stereo_width(const opus_val16 *pcm, int frame_size, opus_int32 Fs, StereoWidthState *mem)
 {
-   opus_val16 corr;
-   opus_val16 ldiff;
-   opus_val16 width;
    opus_val32 xx, xy, yy;
    opus_val16 sqrt_xx, sqrt_yy;
    opus_val16 qrrt_xx, qrrt_yy;
@@ -866,9 +868,12 @@ opus_val16 compute_stereo_width(const opus_val16 *pcm, int frame_size, opus_int3
    opus_val16 short_alpha;
 
    frame_rate = Fs/frame_size;
-   short_alpha = Q15ONE - 25*Q15ONE/IMAX(50,frame_rate);
+   short_alpha = Q15ONE - MULT16_16(25, Q15ONE)/IMAX(50,frame_rate);
    xx=xy=yy=0;
-   for (i=0;i<frame_size;i+=4)
+   /* Unroll by 4. The frame size is always a multiple of 4 *except* for
+      2.5 ms frames at 12 kHz. Since this setting is very rare (and very
+      stupid), we just discard the last two samples. */
+   for (i=0;i<frame_size-3;i+=4)
    {
       opus_val32 pxx=0;
       opus_val32 pxy=0;
@@ -907,6 +912,9 @@ opus_val16 compute_stereo_width(const opus_val16 *pcm, int frame_size, opus_int3
    mem->YY = MAX32(0, mem->YY);
    if (MAX32(mem->XX, mem->YY)>QCONST16(8e-4f, 18))
    {
+      opus_val16 corr;
+      opus_val16 ldiff;
+      opus_val16 width;
       sqrt_xx = celt_sqrt(mem->XX);
       sqrt_yy = celt_sqrt(mem->YY);
       qrrt_xx = celt_sqrt(sqrt_xx);
@@ -915,19 +923,15 @@ opus_val16 compute_stereo_width(const opus_val16 *pcm, int frame_size, opus_int3
       mem->XY = MIN32(mem->XY, sqrt_xx*sqrt_yy);
       corr = SHR32(frac_div32(mem->XY,EPSILON+MULT16_16(sqrt_xx,sqrt_yy)),16);
       /* Approximate loudness difference */
-      ldiff = Q15ONE*ABS16(qrrt_xx-qrrt_yy)/(EPSILON+qrrt_xx+qrrt_yy);
+      ldiff = MULT16_16(Q15ONE, ABS16(qrrt_xx-qrrt_yy))/(EPSILON+qrrt_xx+qrrt_yy);
       width = MULT16_16_Q15(celt_sqrt(QCONST32(1.f,30)-MULT16_16(corr,corr)), ldiff);
       /* Smoothing over one second */
       mem->smoothed_width += (width-mem->smoothed_width)/frame_rate;
       /* Peak follower */
       mem->max_follower = MAX16(mem->max_follower-QCONST16(.02f,15)/frame_rate, mem->smoothed_width);
-   } else {
-      width = 0;
-      corr=Q15ONE;
-      ldiff=0;
    }
    /*printf("%f %f %f %f %f ", corr/(float)Q15ONE, ldiff/(float)Q15ONE, width/(float)Q15ONE, mem->smoothed_width/(float)Q15ONE, mem->max_follower/(float)Q15ONE);*/
-   return EXTRACT16(MIN32(Q15ONE,20*mem->max_follower));
+   return EXTRACT16(MIN32(Q15ONE, MULT16_16(20, mem->max_follower)));
 }
 
 opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_size,
@@ -1006,7 +1010,7 @@ opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_
        analysis_read_subframe_bak = st->analysis.read_subframe;
        run_analysis(&st->analysis, celt_mode, analysis_pcm, analysis_size, frame_size,
              c1, c2, analysis_channels, st->Fs,
-             lsb_depth, downmix, &analysis_info, st->arch);
+             lsb_depth, downmix, &analysis_info);
     }
 #else
     (void)analysis_pcm;
@@ -1045,6 +1049,16 @@ opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_
     st->bitrate_bps = user_bitrate_to_bitrate(st, frame_size, max_data_bytes);
 
     frame_rate = st->Fs/frame_size;
+    if (!st->use_vbr)
+    {
+       int cbrBytes;
+       /* Multiply by 3 to make sure the division is exact. */
+       int frame_rate3 = 3*st->Fs/frame_size;
+       /* We need to make sure that "int" values always fit in 16 bits. */
+       cbrBytes = IMIN( (3*st->bitrate_bps/8 + frame_rate3/2)/frame_rate3, max_data_bytes);
+       st->bitrate_bps = cbrBytes*(opus_int32)frame_rate3*8/3;
+       max_data_bytes = cbrBytes;
+    }
     if (max_data_bytes<3 || st->bitrate_bps < 3*frame_rate*8
        || (frame_rate<50 && (max_data_bytes*frame_rate<300 || st->bitrate_bps < 2400)))
     {
@@ -1061,18 +1075,18 @@ opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_
           bw=OPUS_BANDWIDTH_WIDEBAND;
        else if (tocmode==MODE_CELT_ONLY&&bw==OPUS_BANDWIDTH_MEDIUMBAND)
           bw=OPUS_BANDWIDTH_NARROWBAND;
-       else if (bw<=OPUS_BANDWIDTH_SUPERWIDEBAND)
+       else if (tocmode==MODE_HYBRID&&bw<=OPUS_BANDWIDTH_SUPERWIDEBAND)
           bw=OPUS_BANDWIDTH_SUPERWIDEBAND;
        data[0] = gen_toc(tocmode, frame_rate, bw, st->stream_channels);
+       ret = 1;
+       if (!st->use_vbr)
+       {
+          ret = opus_packet_pad(data, ret, max_data_bytes);
+          if (ret == OPUS_OK)
+             ret = max_data_bytes;
+       }
        RESTORE_STACK;
-       return 1;
-    }
-    if (!st->use_vbr)
-    {
-       int cbrBytes;
-       cbrBytes = IMIN( (st->bitrate_bps + 4*frame_rate)/(8*frame_rate) , max_data_bytes);
-       st->bitrate_bps = cbrBytes * (8*frame_rate);
-       max_data_bytes = cbrBytes;
+       return ret;
     }
     max_rate = frame_rate*max_data_bytes*8;
 
@@ -1508,7 +1522,7 @@ opus_int32 opus_encode_native(OpusEncoder *st, const opus_val16 *pcm, int frame_
                celt_rate = total_bitRate - st->silk_mode.bitRate;
                HB_gain_ref = (curr_bandwidth == OPUS_BANDWIDTH_SUPERWIDEBAND) ? 3000 : 3600;
                HB_gain = SHL32((opus_val32)celt_rate, 9) / SHR32((opus_val32)celt_rate + st->stream_channels * HB_gain_ref, 6);
-               HB_gain = HB_gain < Q15ONE*6/7 ? HB_gain + Q15ONE/7 : Q15ONE;
+               HB_gain = HB_gain < (opus_val32)Q15ONE*6/7 ? HB_gain + Q15ONE/7 : Q15ONE;
             }
         } else {
             /* SILK gets all bits */
@@ -2449,11 +2463,14 @@ int opus_encoder_ctl(OpusEncoder *st, int request, ...)
         {
            void *silk_enc;
            silk_EncControlStruct dummy;
+           char *start;
            silk_enc = (char*)st+st->silk_enc_offset;
+#ifndef DISABLE_FLOAT_API
+           tonality_analysis_reset(&st->analysis);
+#endif
 
-           OPUS_CLEAR((char*)&st->OPUS_ENCODER_RESET_START,
-                 sizeof(OpusEncoder)-
-                 ((char*)&st->OPUS_ENCODER_RESET_START - (char*)st));
+           start = (char*)&st->OPUS_ENCODER_RESET_START;
+           OPUS_CLEAR(start, sizeof(OpusEncoder) - (start - (char*)st));
 
            celt_encoder_ctl(celt_enc, OPUS_RESET_STATE);
            silk_InitEncoder( silk_enc, st->arch, &dummy );

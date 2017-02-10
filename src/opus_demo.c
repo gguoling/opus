@@ -591,10 +591,11 @@ int main(int argc, char *argv[])
 
     in = (short*)malloc(max_frame_size*channels*sizeof(short));
     out = (short*)malloc(max_frame_size*channels*sizeof(short));
+    /* We need to allocate for 16-bit PCM data, but we store it as unsigned char. */
     fbytes = (unsigned char*)malloc(max_frame_size*channels*sizeof(short));
-    data[0] = (unsigned char*)calloc(max_payload_bytes,sizeof(char));
+    data[0] = (unsigned char*)calloc(max_payload_bytes,sizeof(unsigned char));
     if ( use_inbandfec ) {
-        data[1] = (unsigned char*)calloc(max_payload_bytes,sizeof(char));
+        data[1] = (unsigned char*)calloc(max_payload_bytes,sizeof(unsigned char));
     }
     if(delayed_decision)
     {
@@ -866,7 +867,7 @@ int main(int argc, char *argv[])
                      1e-3*bits_max*sampling_rate/frame_size);
     if (!decode_only)
        fprintf (stderr, "active bitrate:              %7.3f kb/s\n",
-               1e-3*bits_act*sampling_rate/(frame_size*(double)count_act));
+               1e-3*bits_act*sampling_rate/(1e-15+frame_size*(double)count_act));
     fprintf (stderr, "bitrate standard deviation:  %7.3f kb/s\n",
             1e-3*sqrt(bits2/count - bits*bits/(count*(double)count))*sampling_rate/frame_size);
     /* Close any files to which intermediate results were stored */
